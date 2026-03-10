@@ -1,0 +1,1163 @@
+// src/MainWindow.cpp
+//----------------------------------
+// RP Soundboard Source Code
+// Copyright (c) 2015 Marius Graefe
+// All rights reserved
+// Contact: rp_soundboard@mgraefe.de
+//----------------------------------
+
+#include "common.h"
+
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QResizeEvent>
+#include <QMessageBox>
+#include <QPropertyAnimation>
+#include <QColorDialog>
+
+#include "MainWindow.h"
+#include "ConfigModel.h"
+#include "main.h"
+#include "SoundSettings.h"
+#include "ts3log.h"
+#include "SpeechBubble.h"
+#include "buildinfo.h"
+#include "plugin.h"
+#include "ExpandableSection.h"
+#include "samples.h"
+#include "SoundButton.h"
+
+#ifdef _WIN32
+#include "Windows.h"
+#endif
+
+enum button_choices_e
+{
+	BC_CHOOSE = 0,
+	BC_ADVANCED,
+	BC_SET_HOTKEY,
+	BC_SET_COLOR,
+	BC_DELETE,
+};
+
+
+MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
+	QWidget(parent),
+	ui(new Ui::MainWindow),
+	m_model(model),
+	m_modelObserver(*this),
+	m_buttonBubble(nullptr),
+	m_playlistStartButton(nullptr),
+	m_playlistPrevButton(nullptr),
+	m_playlistNextButton(nullptr),
+	m_playlistView(nullptr),
+	m_playlistNowLabel(nullptr),
+	m_playlistNextLabel(nullptr),
+	m_playlistCurrentPos(-1),
+	m_playlistRunning(false),
+	m_ignoreNextStopEvent(false)
+{
+	/* Ensure resources are loaded */
+	Q_INIT_RESOURCE(qtres);
+
+	m_pauseIcon = QIcon(":/icon/img/pausebutton_32.png");
+	m_playIcon = QIcon(":/icon/img/playarrow_32.png");
+
+	ui->setupUi(this);
+	// setAttribute(Qt::WA_DeleteOnClose);
+
+	createConfigButtons();
+
+	settingsSection = new ExpandableSection("Settings", 200, this);
+	settingsSection->setContentLayout(*ui->settingsWidget->layout());
+	layout()->addWidget(settingsSection);
+
+	configsSection = new ExpandableSection("Configurations", 200, this);
+	configsSection->setContentLayout(*ui->configsWidget->layout());
+	layout()->addWidget(configsSection);
+
+	QAction* actChooseFile = new QAction("Choose File", this);
+	actChooseFile->setData((int)BC_CHOOSE);
+	m_buttonContextMenu.addAction(actChooseFile);
+
+	QAction* actAdvancedOpts = new QAction("Advanced Options", this);
+	actAdvancedOpts->setData((int)BC_ADVANCED);
+	m_buttonContextMenu.addAction(actAdvancedOpts);
+
+	actSetHotkey = new QAction("Set hotkey", this);
+	actSetHotkey->setData((int)BC_SET_HOTKEY);
+	m_buttonContextMenu.addAction(actSetHotkey);
+
+	QAction* actSetColor = new QAction("Set color", this);
+	actSetColor->setData((int)BC_SET_COLOR);
+	m_buttonContextMenu.addAction(actSetColor);
+
+	QAction* actDeleteButton = new QAction("Make button great again (delete)", this);
+	actDeleteButton->setData((int)BC_DELETE);
+	m_buttonContextMenu.addAction(actDeleteButton);
+
+	createButtons();
+
+	m_playlistPrevButton = new QPushButton("⏮", this);
+	m_playlistPrevButton->setToolTip("Previous track");
+	m_playlistNextButton = new QPushButton("⏭", this);
+	m_playlistNextButton->setToolTip("Next track");
+	m_playlistStartButton = new QPushButton("▶ Playlist", this);
+	m_playlistStartButton->setToolTip("Start playlist");
+	ui->horizontalLayout_4->insertWidget(0, m_playlistPrevButton);
+	ui->horizontalLayout_4->insertWidget(1, m_playlistStartButton);
+	ui->horizontalLayout_4->insertWidget(2, m_playlistNextButton);
+
+	QWidget* playlistWidget = new QWidget(this);
+	QVBoxLayout* playlistLayout = new QVBoxLayout(playlistWidget);
+	playlistLayout->setContentsMargins(9, 3, 9, 3);
+	playlistLayout->setSpacing(3);
+	m_playlistNowLabel = new QLabel("Now: -", playlistWidget);
+	m_playlistNextLabel = new QLabel("Next: -", playlistWidget);
+	m_playlistView = new QListWidget(playlistWidget);
+	m_playlistView->setMinimumHeight(110);
+	playlistLayout->addWidget(m_playlistNowLabel);
+	playlistLayout->addWidget(m_playlistNextLabel);
+	playlistLayout->addWidget(m_playlistView);
+	layout()->addWidget(playlistWidget);
+
+	ui->b_stop->setContextMenuPolicy(Qt::CustomContextMenu);
+	ui->b_pause->setContextMenuPolicy(Qt::CustomContextMenu);
+	ui->cb_mute_locally->setContextMenuPolicy(Qt::CustomContextMenu);
+	ui->cb_mute_myself->setContextMenuPolicy(Qt::CustomContextMenu);
+	ui->sl_volumeLocal->setContextMenuPolicy(Qt::CustomContextMenu);
+	ui->sl_volumeRemote->setContextMenuPolicy(Qt::CustomContextMenu);
+	m_playlistStartButton->setContextMenuPolicy(Qt::CustomContextMenu);
+	m_playlistPrevButton->setContextMenuPolicy(Qt::CustomContextMenu);
+	m_playlistNextButton->setContextMenuPolicy(Qt::CustomContextMenu);
+
+	connect(ui->b_stop, SIGNAL(clicked()), this, SLOT(onClickedStop()));
+	connect(
+		ui->b_stop, SIGNAL(customContextMenuRequested(const QPoint&)), this,
+		SLOT(showStopButtonContextMenu(const QPoint&))
+	);
+	connect(ui->b_pause, SIGNAL(clicked()), this, SLOT(onButtonPausePressed()));
+	connect(m_playlistStartButton, SIGNAL(clicked()), this, SLOT(onPlaylistStartPressed()));
+	connect(m_playlistPrevButton, SIGNAL(clicked()), this, SLOT(onPlaylistPrevPressed()));
+	connect(m_playlistNextButton, SIGNAL(clicked()), this, SLOT(onPlaylistNextPressed()));
+	connect(m_playlistView, SIGNAL(itemDoubleClicked(QListWidgetItem*)), this, SLOT(onPlaylistItemDoubleClicked(QListWidgetItem*)));
+	connect(
+		ui->b_pause, SIGNAL(customContextMenuRequested(const QPoint&)), this,
+		SLOT(showPauseButtonContextMenu(const QPoint&))
+	);
+	connect(ui->sl_volumeLocal, SIGNAL(valueChanged(int)), this, SLOT(onUpdateVolumeLocal(int)));
+	connect(ui->sl_volumeRemote, SIGNAL(valueChanged(int)), this, SLOT(onUpdateVolumeRemote(int)));
+	connect(ui->cb_mute_locally, SIGNAL(clicked(bool)), this, SLOT(onUpdateMuteLocally(bool)));
+	connect(ui->sb_rows, SIGNAL(valueChanged(int)), this, SLOT(onUpdateRows(int)));
+	connect(ui->sb_cols, SIGNAL(valueChanged(int)), this, SLOT(onUpdateCols(int)));
+	connect(ui->cb_mute_myself, SIGNAL(clicked(bool)), this, SLOT(onUpdateMuteMyself(bool)));
+	connect(ui->cb_show_hotkeys_on_buttons, SIGNAL(clicked(bool)), this, SLOT(onUpdateShowHotkeysOnButtons(bool)));
+	connect(ui->cb_disable_hotkeys, SIGNAL(clicked(bool)), this, SLOT(onUpdateHotkeysDisabled(bool)));
+	connect(ui->filterEdit, SIGNAL(textChanged(const QString&)), this, SLOT(onFilterEditTextChanged(const QString&)));
+	connect(
+		ui->cb_mute_locally, &QCheckBox::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_MUTE_ON_MY_CLIENT, ui->cb_mute_locally->mapToGlobal(point)); }
+	);
+	connect(
+		ui->cb_mute_myself, &QCheckBox::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_MUTE_MYSELF, ui->cb_mute_myself->mapToGlobal(point)); }
+	);
+	connect(
+		ui->sl_volumeLocal, &QSlider::customContextMenuRequested, this, &MainWindow::onVolumeSliderContextMenuLocal
+	);
+	connect(
+		ui->sl_volumeRemote, &QSlider::customContextMenuRequested, this, &MainWindow::onVolumeSliderContextMenuRemote
+	);
+	connect(
+		m_playlistStartButton, &QPushButton::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_PLAYLIST_START, m_playlistStartButton->mapToGlobal(point)); }
+	);
+	connect(
+		m_playlistNextButton, &QPushButton::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_PLAYLIST_NEXT, m_playlistNextButton->mapToGlobal(point)); }
+	);
+	connect(
+		m_playlistPrevButton, &QPushButton::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_PLAYLIST_PREV, m_playlistPrevButton->mapToGlobal(point)); }
+	);
+
+	/* Load/Save Model */
+	connect(ui->pushLoad, SIGNAL(released()), this, SLOT(onLoadModel()));
+	connect(ui->pushSave, SIGNAL(released()), this, SLOT(onSaveModel()));
+
+	ui->playingIconLabel->hide();
+	ui->playingLabel->setText("");
+	playingIconTimer = new QTimer(this);
+	playingIconTimer->setInterval(150);
+	connect(playingIconTimer, SIGNAL(timeout()), this, SLOT(onPlayingIconTimer()));
+
+	Sampler* sampler = sb_getSampler();
+	connect(
+		sampler, SIGNAL(onStartPlaying(bool, QString)), this, SLOT(onStartPlayingSound(bool, QString)),
+		Qt::QueuedConnection
+	);
+	connect(sampler, SIGNAL(onStopPlaying()), this, SLOT(onStopPlayingSound()), Qt::QueuedConnection);
+	connect(
+		sampler, SIGNAL(onPausePlaying()), this, SLOT(onPausePlayingSound())
+	); // No queued connection since signal is emitted from GUI Thread
+	connect(
+		sampler, SIGNAL(onUnpausePlaying()), this, SLOT(onUnpausePlayingSound())
+	); // No queued connection since signal is emitted from GUI Thread
+
+	createBubbles();
+
+	m_model->addObserver(&m_modelObserver);
+
+	/* Force configuration 0 */
+	setConfiguration(0);
+	rebuildPlaylist();
+
+	ui->gridWidget->setStyleSheet(
+		"QPushButton {"
+		"  padding: 4px;"
+		"  border: 1px solid rgb(173, 173, 173);"
+		"  color: black;"
+		"  background-color: rgb(225, 225, 225);"
+		"}"
+		"QPushButton:disabled {"
+		"  background-color: rgb(204, 204, 204);"
+		"  border-color: rgb(191, 191, 191);"
+		"  color: rgb(120, 120, 120);"
+		"}"
+		"QPushButton:hover {"
+		"  background-color: rgb(228, 239, 249);"
+		"  border-color: rgb(11, 123, 212);"
+		"}"
+		"QPushButton:pressed {"
+		"  background-color: rgb(204, 228, 247);"
+		"  border-color: rgb(0, 85, 155);"
+		"}"
+	);
+}
+
+void MainWindow::setConfiguration(int cfg)
+{
+	if (cfg < 0 || cfg >= NUM_CONFIGS)
+	{
+		logError("Invalid config id: %i", cfg);
+		return;
+	}
+
+	m_configRadioButtons[cfg]->setChecked(true);
+	m_model->setConfiguration(cfg);
+	ui->labelStatus->setText(QString("Configuration %1").arg(cfg + 1));
+	rebuildPlaylist();
+}
+
+void MainWindow::onSetConfig()
+{
+	QRadioButton* button = qobject_cast<QRadioButton*>(sender());
+	int configId = button->property("configId").toInt();
+	setConfiguration(configId);
+}
+
+void MainWindow::onConfigHotkey()
+{
+	QPushButton* button = qobject_cast<QPushButton*>(sender());
+	int configId = button->property("configId").toInt();
+
+	char buf[16];
+	sb_getInternalConfigHotkeyName(configId, buf);
+	ts3Functions.requestHotkeyInputDialog(getPluginID(), buf, configId, this);
+}
+
+
+MainWindow::~MainWindow()
+{
+	m_model->remObserver(&m_modelObserver);
+	delete ui;
+}
+
+void MainWindow::onSaveModel()
+{
+	QString fn = QFileDialog::getSaveFileName(this, tr("Choose File to Save"), QString(), tr("Ini Files (*.ini)"));
+	if (fn.isNull())
+		return;
+	m_model->writeConfig(fn);
+}
+
+void MainWindow::onLoadModel()
+{
+	QString fn = QFileDialog::getOpenFileName(this, tr("Choose File to Load"), QString(), tr("Ini Files (*.ini)"));
+	if (fn.isNull())
+		return;
+	m_model->readConfig(fn);
+}
+
+void MainWindow::closeEvent(QCloseEvent*)
+{
+	m_model->setWindowSize(size().width(), size().height());
+}
+
+void MainWindow::onClickedPlay()
+{
+	QPushButton* button = dynamic_cast<QPushButton*>(sender());
+	size_t buttonId =
+		std::find_if(m_buttons.begin(), m_buttons.end(), [button](SoundButton* b) { return b == button; }) -
+		m_buttons.begin();
+
+	playSound(buttonId);
+}
+
+
+void MainWindow::onClickedStop()
+{
+	m_playlistRunning = false;
+	sb_stopPlayback();
+	refreshPlaylistUi();
+}
+
+
+void MainWindow::onUpdateVolumeLocal(int val)
+{
+	m_model->setVolumeLocal(val);
+}
+
+
+void MainWindow::onUpdateVolumeRemote(int val)
+{
+	m_model->setVolumeRemote(val);
+}
+
+
+void MainWindow::onUpdateMuteLocally(bool val)
+{
+	m_model->setPlaybackLocal(!val);
+}
+
+
+void MainWindow::onUpdateCols(int val)
+{
+	m_model->setCols(val);
+}
+
+
+void MainWindow::onUpdateRows(int val)
+{
+	m_model->setRows(val);
+}
+
+
+void MainWindow::onUpdateMuteMyself(bool val)
+{
+	m_model->setMuteMyselfDuringPb(val);
+}
+
+
+void MainWindow::createButtons()
+{
+	for (SoundButton* button : m_buttons)
+		delete button;
+	m_buttons.clear();
+
+	int numRows = m_model->getRows();
+	int numCols = m_model->getCols();
+
+	for (int i = 0; i < numRows; i++)
+	{
+		for (int j = 0; j < numCols; j++)
+		{
+			SoundButton* elem = new SoundButton(this);
+			elem->setProperty("buttonId", (int)m_buttons.size());
+			elem->setText("(no file)");
+			elem->setEnabled(true);
+			QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+			policy.setRetainSizeWhenHidden(true);
+			elem->setSizePolicy(policy);
+			ui->gridLayout->addWidget(elem, i, j);
+			connect(elem, SIGNAL(clicked()), this, SLOT(onClickedPlay()));
+			elem->setContextMenuPolicy(Qt::CustomContextMenu);
+			connect(
+				elem, SIGNAL(customContextMenuRequested(const QPoint&)), this,
+				SLOT(showButtonContextMenu(const QPoint&))
+			);
+			connect(elem, SIGNAL(fileDropped(QList<QUrl>)), this, SLOT(onButtonFileDropped(QList<QUrl>)));
+			connect(elem, SIGNAL(buttonDropped(SoundButton*)), this, SLOT(onButtonDroppedOnButton(SoundButton*)));
+
+			elem->updateGeometry();
+			m_buttons.push_back(elem);
+		}
+	}
+
+	for (int i = 0; i < (int)m_buttons.size(); i++)
+		updateButtonText(i);
+
+	if (m_buttonBubble)
+		m_buttonBubble->attachTo(m_buttons[0]);
+}
+
+
+void MainWindow::createConfigButtons()
+{
+	for (int i = 0; i < NUM_CONFIGS; i++)
+	{
+		m_configRadioButtons[i] = new QRadioButton(this);
+		m_configRadioButtons[i]->setText(QString("Config %1").arg(i + 1));
+		m_configRadioButtons[i]->setProperty("configId", i);
+		m_configRadioButtons[i]->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+		ui->configsGrid->addWidget(m_configRadioButtons[i], 0, i, Qt::AlignCenter);
+		connect(m_configRadioButtons[i], SIGNAL(clicked()), this, SLOT(onSetConfig()));
+
+		m_configHotkeyButtons[i] = new QPushButton(this);
+		m_configHotkeyButtons[i]->setText("Set hotkey");
+		m_configHotkeyButtons[i]->setProperty("configId", i);
+		m_configHotkeyButtons[i]->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		m_configHotkeyButtons[i]->setToolTipDuration(0);
+		m_configHotkeyButtons[i]->setToolTip(getConfigShortcutString(i));
+		ui->configsGrid->addWidget(m_configHotkeyButtons[i], 1, i, Qt::AlignCenter);
+		connect(m_configHotkeyButtons[i], SIGNAL(clicked()), this, SLOT(onConfigHotkey()));
+
+		ui->configsWidget->updateGeometry();
+	}
+}
+
+
+bool MainWindow::hotkeysEnabled()
+{
+	return m_model->getHotkeysEnabled();
+}
+
+void MainWindow::updateButtonText(int i)
+{
+	if (i >= (int)m_buttons.size())
+		return;
+
+	QString text;
+	const SoundInfo* info = m_model->getSoundInfo(i);
+	if (info && !info->filename.isEmpty())
+	{
+		if (!info->customText.isEmpty())
+			text = unescapeCustomText(info->customText);
+		else
+			text = QFileInfo(info->filename).baseName();
+	}
+	else
+		text = "(no file)";
+
+	if (m_model->getShowHotkeysOnButtons())
+	{
+		QString shortcut = getShortcutString(i);
+		if (shortcut.length() > 0)
+			text = text + "\n" + shortcut;
+	}
+	m_buttons[i]->setText(text);
+	m_buttons[i]->setBackgroundColor(info ? info->customColor : QColor(0, 0, 0, 0));
+}
+
+
+void MainWindow::showButtonContextMenu(const QPoint& point)
+{
+	QPushButton* button = dynamic_cast<QPushButton*>(sender());
+	size_t buttonId =
+		std::find_if(m_buttons.begin(), m_buttons.end(), [button](SoundButton* b) { return b == button; }) -
+		m_buttons.begin();
+
+	QString shortcutName = getShortcutString(buttonId);
+	QString hotkeyText = "Set hotkey (Current: " + (shortcutName.isEmpty() ? QString("None") : shortcutName) + ")";
+	actSetHotkey->setText(hotkeyText);
+
+	QPoint globalPos = m_buttons[buttonId]->mapToGlobal(point);
+	QAction* action = m_buttonContextMenu.exec(globalPos);
+	if (action)
+	{
+		bool ok = false;
+		int choice = action->data().toInt(&ok);
+		if (ok)
+		{
+			switch (choice)
+			{
+			case BC_CHOOSE:
+				chooseFile(buttonId);
+				break;
+			case BC_ADVANCED:
+				openAdvanced(buttonId);
+				break;
+			case BC_SET_HOTKEY:
+				openHotkeySetDialog(buttonId);
+				break;
+			case BC_SET_COLOR:
+				openButtonColorDialog(buttonId);
+				break;
+			case BC_DELETE:
+				deleteButton(buttonId);
+				break;
+			default:
+				break;
+			}
+		}
+		else
+			logError("Invalid user data in context menu");
+	}
+}
+
+
+void MainWindow::setPlayingLabelIcon(int index)
+{
+	ui->playingIconLabel->setPixmap(QPixmap(QString(":/icon/img/speaker_icon_%1_64.png").arg(index)));
+}
+
+
+void MainWindow::playSound(size_t buttonId)
+{
+	const SoundInfo* info = m_model->getSoundInfo(buttonId);
+	if (info)
+	{
+		auto it = std::find(m_playlistIndices.begin(), m_playlistIndices.end(), (int)buttonId);
+		if (it != m_playlistIndices.end())
+			m_playlistCurrentPos = (int)std::distance(m_playlistIndices.begin(), it);
+		sb_playFile(*info);
+		refreshPlaylistUi();
+	}
+}
+
+void MainWindow::rebuildPlaylist()
+{
+	m_playlistIndices.clear();
+	if (m_playlistView)
+		m_playlistView->clear();
+
+	for (size_t i = 0; i < m_buttons.size(); ++i)
+	{
+		const SoundInfo* info = m_model->getSoundInfo((int)i);
+		if (!info || info->filename.isEmpty())
+			continue;
+		m_playlistIndices.push_back((int)i);
+		QString title = !info->customText.isEmpty() ? unescapeCustomText(info->customText) : QFileInfo(info->filename).baseName();
+		if (m_playlistView)
+			m_playlistView->addItem(QString("%1. %2").arg(m_playlistIndices.size()).arg(title));
+	}
+
+	if (m_playlistIndices.empty())
+	{
+		m_playlistCurrentPos = -1;
+		m_playlistRunning = false;
+	}
+	else if (m_playlistCurrentPos < 0 || m_playlistCurrentPos >= (int)m_playlistIndices.size())
+	{
+		m_playlistCurrentPos = 0;
+	}
+
+	refreshPlaylistUi();
+}
+
+void MainWindow::refreshPlaylistUi()
+{
+	if (!m_playlistNowLabel || !m_playlistNextLabel)
+		return;
+
+	if (m_playlistIndices.empty() || m_playlistCurrentPos < 0)
+	{
+		m_playlistNowLabel->setText("Now: -");
+		m_playlistNextLabel->setText("Next: -");
+		if (m_playlistStartButton)
+			m_playlistStartButton->setText("▶ Playlist");
+		return;
+	}
+
+	int nowButtonId = m_playlistIndices[m_playlistCurrentPos];
+	const SoundInfo* nowInfo = m_model->getSoundInfo(nowButtonId);
+	QString nowTitle = nowInfo ? (!nowInfo->customText.isEmpty() ? unescapeCustomText(nowInfo->customText)
+																 : QFileInfo(nowInfo->filename).baseName())
+						  : QString("-");
+	m_playlistNowLabel->setText(QString("Now: %1").arg(nowTitle));
+
+	int nextPos = (m_playlistCurrentPos + 1) % m_playlistIndices.size();
+	int nextButtonId = m_playlistIndices[nextPos];
+	const SoundInfo* nextInfo = m_model->getSoundInfo(nextButtonId);
+	QString nextTitle = nextInfo ? (!nextInfo->customText.isEmpty() ? unescapeCustomText(nextInfo->customText)
+																  : QFileInfo(nextInfo->filename).baseName())
+						   : QString("-");
+	m_playlistNextLabel->setText(QString("Next: %1").arg(nextTitle));
+
+	if (m_playlistView)
+	{
+		m_playlistView->setCurrentRow(m_playlistCurrentPos);
+	}
+	if (m_playlistStartButton)
+		m_playlistStartButton->setText(m_playlistRunning ? "■ Playlist" : "▶ Playlist");
+}
+
+void MainWindow::playPlaylistPosition(int pos)
+{
+	if (m_playlistIndices.empty())
+		return;
+	if (pos < 0 || pos >= (int)m_playlistIndices.size())
+		return;
+	m_playlistCurrentPos = pos;
+	m_ignoreNextStopEvent = true;
+	playSound(m_playlistIndices[m_playlistCurrentPos]);
+	m_playlistRunning = true;
+	refreshPlaylistUi();
+}
+
+void MainWindow::playlistStart()
+{
+	if (m_playlistIndices.empty())
+		rebuildPlaylist();
+	if (m_playlistIndices.empty())
+		return;
+
+	if (m_playlistRunning)
+	{
+		m_playlistRunning = false;
+		sb_stopPlayback();
+		refreshPlaylistUi();
+		return;
+	}
+
+	if (m_playlistCurrentPos < 0)
+		m_playlistCurrentPos = 0;
+	playPlaylistPosition(m_playlistCurrentPos);
+}
+
+void MainWindow::playlistNext()
+{
+	if (m_playlistIndices.empty())
+		return;
+	int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistIndices.size();
+	playPlaylistPosition(nextPos);
+}
+
+void MainWindow::playlistPrev()
+{
+	if (m_playlistIndices.empty())
+		return;
+	int prevPos = (m_playlistCurrentPos <= 0) ? (int)m_playlistIndices.size() - 1 : (m_playlistCurrentPos - 1);
+	playPlaylistPosition(prevPos);
+}
+
+
+void MainWindow::chooseFile(size_t buttonId)
+{
+	QString filePath = m_model->getFileName(buttonId);
+	QString fn = QFileDialog::getOpenFileName(this, tr("Choose File"), filePath, tr("Files (*.*)"));
+	if (fn.isNull())
+		return;
+	setButtonFile(buttonId, fn);
+}
+
+
+void MainWindow::openAdvanced(size_t buttonId)
+{
+	const SoundInfo* buttonInfo = m_model->getSoundInfo(buttonId);
+	SoundInfo defaultInfo;
+	const SoundInfo& info = buttonInfo ? *buttonInfo : defaultInfo;
+	SoundSettingsQt dlg(info, buttonId, this);
+	dlg.setWindowTitle(QString("Sound %1 Settings").arg(QString::number(buttonId + 1)));
+	if (dlg.exec() == QDialog::Accepted)
+		m_model->setSoundInfo(buttonId, dlg.getSoundInfo());
+}
+
+
+void MainWindow::deleteButton(size_t buttonId)
+{
+	const SoundInfo* info = m_model->getSoundInfo(buttonId);
+	if (info)
+		m_model->setSoundInfo(buttonId, SoundInfo());
+}
+
+
+void MainWindow::createBubbles()
+{
+	if (m_model->getBubbleButtonsBuild() == 0)
+	{
+		m_buttonBubble = new SpeechBubble(this);
+		m_buttonBubble->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+		m_buttonBubble->setFixedSize(180, 80);
+		m_buttonBubble->setText("Right click to choose sound file\nor open advanced options.");
+		m_buttonBubble->attachTo(m_buttons[0]);
+		connect(m_buttonBubble, SIGNAL(closePressed()), this, SLOT(onButtonBubbleFinished()));
+	}
+
+	if (m_model->getBubbleStopBuild() == 0)
+	{
+		SpeechBubble* stopBubble = new SpeechBubble(this);
+		stopBubble->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+		stopBubble->setFixedSize(180, 60);
+		stopBubble->setText("Stop the currently playing sound.");
+		stopBubble->attachTo(ui->b_stop);
+		connect(stopBubble, SIGNAL(closePressed()), this, SLOT(onStopBubbleFinished()));
+	}
+
+	if (m_model->getBubbleColsBuild() == 0)
+	{
+		settingsSection->setExpanded(true);
+		SpeechBubble* colsBubble = new SpeechBubble(this);
+		colsBubble->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
+		colsBubble->setFixedSize(180, 80);
+		colsBubble->setText("Change the number of buttons\non the soundboard.");
+		colsBubble->attachTo(ui->sb_cols);
+		connect(colsBubble, SIGNAL(closePressed()), this, SLOT(onColsBubbleFinished()));
+	}
+}
+
+
+void MainWindow::onStopBubbleFinished()
+{
+	m_model->setBubbleStopBuild(buildinfo_getBuildNumber());
+}
+
+
+void MainWindow::onButtonBubbleFinished()
+{
+	m_model->setBubbleButtonsBuild(buildinfo_getBuildNumber());
+}
+
+
+void MainWindow::onColsBubbleFinished()
+{
+	m_model->setBubbleColsBuild(buildinfo_getBuildNumber());
+}
+
+
+void MainWindow::showStopButtonContextMenu(const QPoint& point)
+{
+	showSetHotkeyMenu(HOTKEY_STOP_ALL, ui->b_stop->mapToGlobal(point));
+}
+
+
+void MainWindow::showPauseButtonContextMenu(const QPoint& point)
+{
+	showSetHotkeyMenu(HOTKEY_PAUSE_ALL, ui->b_pause->mapToGlobal(point));
+}
+
+
+void MainWindow::showSetHotkeyMenu(const char* hotkeyName, const QPoint& point)
+{
+	QString hotkeyString = getShortcutString(hotkeyName);
+	QString hotkeyText = "Set hotkey (Current: " + (hotkeyString.isEmpty() ? QString("None") : hotkeyString) + ")";
+
+	QMenu menu;
+	menu.addAction(hotkeyText);
+	QAction* action = menu.exec(point);
+	if (action)
+		ts3Functions.requestHotkeyInputDialog(getPluginID(), hotkeyName, 0, this);
+}
+
+
+void MainWindow::onStartPlayingSound(bool preview, QString filename)
+{
+	QFileInfo info(filename);
+	ui->playingLabel->setText(info.fileName());
+	setPlayingLabelIcon(0);
+	ui->playingIconLabel->show();
+	playingIconIndex = 1;
+	playingIconTimer->start();
+	ui->b_stop->setEnabled(true);
+	ui->b_pause->setEnabled(true);
+	ui->b_pause->setIcon(m_pauseIcon);
+}
+
+
+void MainWindow::onStopPlayingSound()
+{
+	playingIconTimer->stop();
+	ui->playingLabel->setText("");
+	ui->playingIconLabel->hide();
+	ui->b_pause->setIcon(m_pauseIcon);
+
+	if (m_ignoreNextStopEvent)
+	{
+		m_ignoreNextStopEvent = false;
+		return;
+	}
+
+	if (m_playlistRunning && !m_playlistIndices.empty())
+	{
+		int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistIndices.size();
+		playPlaylistPosition(nextPos);
+	}
+	else
+	{
+		refreshPlaylistUi();
+	}
+}
+
+
+void MainWindow::onPausePlayingSound()
+{
+	playingIconTimer->stop();
+	ui->b_pause->setIcon(m_playIcon);
+}
+
+
+void MainWindow::onUnpausePlayingSound()
+{
+	playingIconTimer->start();
+	ui->b_pause->setIcon(m_pauseIcon);
+}
+
+
+void MainWindow::onPlayingIconTimer()
+{
+	setPlayingLabelIcon(playingIconIndex);
+	++playingIconIndex %= 4;
+}
+
+
+void MainWindow::openHotkeySetDialog(size_t buttonId)
+{
+	openHotkeySetDialog(buttonId, this);
+}
+
+
+void MainWindow::openButtonColorDialog(size_t buttonId)
+{
+	QColorDialog dialog;
+	const SoundInfo* pinfo = m_model->getSoundInfo(buttonId);
+	SoundInfo info = pinfo ? *pinfo : SoundInfo();
+	dialog.setCurrentColor(info.customColor);
+	dialog.setWindowTitle("Choose button color");
+	if (dialog.exec())
+	{
+		info.customColor = dialog.currentColor();
+		m_model->setSoundInfo(buttonId, info);
+	}
+}
+
+
+QString MainWindow::unescapeCustomText(const QString& text)
+{
+	QString cpy = text;
+	return cpy.replace("\\n", "\n");
+}
+
+
+void MainWindow::openHotkeySetDialog(size_t buttonId, QWidget* parent)
+{
+	char intName[16];
+	sb_getInternalHotkeyName((int)buttonId, intName);
+	ts3Functions.requestHotkeyInputDialog(getPluginID(), intName, 0, parent);
+}
+
+
+QString MainWindow::getShortcutString(const char* internalName)
+{
+	std::vector<char> name(128, 0);
+	char* namePtr = name.data();
+	unsigned int res = ts3Functions.getHotkeyFromKeyword(getPluginID(), &internalName, &namePtr, 1, 128);
+	QString str = res == 0 ? QString(name.data()) : QString();
+	return str;
+}
+
+
+QString MainWindow::getShortcutString(size_t buttonId)
+{
+	char intName[16];
+	sb_getInternalHotkeyName((int)buttonId, intName);
+	return getShortcutString(intName);
+}
+
+QString MainWindow::getConfigShortcutString(int cfg)
+{
+	char buf[16];
+	sb_getInternalConfigHotkeyName(cfg, buf);
+	QString shortcut = getShortcutString(buf);
+	if (!shortcut.isEmpty())
+		return shortcut;
+
+	return QString("no hotkey");
+}
+
+
+void MainWindow::onHotkeyRecordedEvent(const char* keyword, const char* key)
+{
+	QString sKey = key;
+
+	int configId = -1;
+	if (sscanf(keyword, "config_%i", &configId) == 1)
+	{
+		if (configId >= 0 && configId < NUM_CONFIGS)
+			m_configHotkeyButtons[configId]->setToolTip(sKey);
+		else
+			logError("Invalid hotkey keyword: %s", keyword);
+	}
+	else
+	{
+		QString sKeyword = keyword;
+
+		emit hotkeyRecordedEvent(sKey, sKeyword);
+
+		if (m_model->getShowHotkeysOnButtons())
+			for (size_t i = 0; i < m_buttons.size(); i++)
+				updateButtonText(i);
+	}
+}
+
+
+void MainWindow::onUpdateShowHotkeysOnButtons(bool val)
+{
+	m_model->setShowHotkeysOnButtons(val);
+}
+
+
+void MainWindow::onUpdateHotkeysDisabled(bool val)
+{
+	m_model->setHotkeysEnabled(!val);
+}
+
+
+void MainWindow::showEvent(QShowEvent* evt)
+{
+	QWidget::showEvent(evt);
+
+	for (size_t i = 0; i < m_buttons.size(); i++)
+		updateButtonText(i);
+}
+
+
+void MainWindow::onButtonFileDropped(const QList<QUrl>& urls)
+{
+	int buttonId = sender()->property("buttonId").toInt();
+	int buttonNr = 0;
+
+	for (int i = 0; i < urls.size(); i++)
+	{
+		if (buttonNr == 1)
+		{
+			QMessageBox msgbox(
+				QMessageBox::Icon::Question, "Fill buttons?",
+				"You dropped multiple files. Consecutively apply them to the buttons following the one you dropped "
+				"your files on?",
+				QMessageBox::Yes | QMessageBox::No, this
+			);
+			if (msgbox.exec() == QMessageBox::No)
+				break;
+		}
+
+		if (urls[i].isLocalFile())
+		{
+			QFileInfo info(urls[i].toLocalFile());
+			if (info.isFile())
+			{
+				setButtonFile(buttonId + buttonNr, urls[i].toLocalFile(), buttonNr == 0);
+				++buttonNr;
+			}
+			else if (buttonNr == 0)
+			{
+				QMessageBox msgBox(
+					QMessageBox::Icon::Critical, "Unsupported drop type", "Some things could not be dropped here :(",
+					QMessageBox::Ok, this
+				);
+				msgBox.exec();
+			}
+		}
+	}
+}
+
+
+void MainWindow::setButtonFile(size_t buttonId, const QString& fn, bool askForDisablingCrop)
+{
+	const SoundInfo* info = m_model->getSoundInfo(buttonId);
+	if (askForDisablingCrop && info && info->cropEnabled && info->filename != fn)
+	{
+		QMessageBox mb(
+			QMessageBox::Question, "Keep crop settings?",
+			"You selected a new file for a button that has 'crop sound' enabled.", QMessageBox::NoButton, this
+		);
+		QPushButton* btnDisable = mb.addButton("Disable cropping (recommended)", QMessageBox::YesRole);
+		QPushButton* btnKeep = mb.addButton("Keep old crop settings", QMessageBox::NoRole);
+		mb.setDefaultButton(btnDisable);
+		mb.exec();
+		if (mb.clickedButton() != btnKeep)
+		{
+			SoundInfo newInfo(*info);
+			newInfo.cropEnabled = false;
+			m_model->setSoundInfo(buttonId, newInfo);
+		}
+	}
+	m_model->setFileName(buttonId, fn);
+}
+
+
+void MainWindow::onButtonPausePressed()
+{
+	sb_pauseButtonPressed();
+}
+
+void MainWindow::onPlaylistStartPressed()
+{
+	playlistStart();
+}
+
+void MainWindow::onPlaylistNextPressed()
+{
+	playlistNext();
+}
+
+void MainWindow::onPlaylistPrevPressed()
+{
+	playlistPrev();
+}
+
+void MainWindow::onPlaylistItemDoubleClicked(QListWidgetItem* item)
+{
+	if (!item)
+		return;
+	int row = m_playlistView->row(item);
+	playPlaylistPosition(row);
+}
+
+
+void MainWindow::onButtonDroppedOnButton(SoundButton* button)
+{
+	SoundButton* btn0 = button;
+	SoundButton* btn1 = qobject_cast<SoundButton*>(sender());
+	int bid0 = btn0->property("buttonId").toInt();
+	int bid1 = btn1->property("buttonId").toInt();
+	const SoundInfo* info0 = m_model->getSoundInfo(bid0);
+	const SoundInfo* info1 = m_model->getSoundInfo(bid1);
+
+	// Copy sound info
+	SoundInfo infoCopy0;
+	SoundInfo infoCopy1;
+	if (info0)
+		infoCopy0 = *info0;
+	if (info1)
+		infoCopy1 = *info1;
+
+	// And switch em
+	m_model->setSoundInfo(bid0, infoCopy1);
+	m_model->setSoundInfo(bid1, infoCopy0);
+
+	// Switch button position and then animate the buttons to slide into place
+	const int animDuration = 300;
+	QPropertyAnimation* anim0 = new QPropertyAnimation(btn0, "pos");
+	anim0->setStartValue(btn1->pos());
+	anim0->setEndValue(btn0->pos());
+	anim0->setDuration(animDuration);
+
+	QPropertyAnimation* anim1 = new QPropertyAnimation(btn1, "pos");
+	anim1->setStartValue(btn0->pos());
+	anim1->setEndValue(btn1->pos());
+	anim1->setDuration(animDuration);
+
+	anim0->start();
+	anim1->start();
+	btn0->raise();
+	btn1->raise();
+}
+
+
+void MainWindow::onFilterEditTextChanged(const QString& text)
+{
+	QString filter = text.trimmed();
+	for (auto& button : m_buttons)
+	{
+		int buttonId = button->property("buttonId").toInt();
+		const SoundInfo* info = m_model->getSoundInfo(buttonId);
+		bool hasFile = info && !info->filename.isEmpty();
+		QString buttonText = button->text();
+		bool pass = filter.length() == 0 || (hasFile && buttonText.contains(filter, Qt::CaseInsensitive));
+		button->setVisible(pass);
+	}
+}
+
+
+void MainWindow::onVolumeSliderContextMenuLocal(const QPoint& point)
+{
+	QString hotkeyStringIncr = getShortcutString(HOTKEY_VOLUME_INCREASE);
+	QString hotkeyTextIncr =
+		"Set 'increase 20%' hotkey (Current: " + (hotkeyStringIncr.isEmpty() ? QString("None") : hotkeyStringIncr) +
+		")";
+
+	QString hotkeyStringDecr = getShortcutString(HOTKEY_VOLUME_DECREASE);
+	QString hotkeyTextDecr =
+		"Set 'decrease 20%' hotkey (Current: " + (hotkeyStringDecr.isEmpty() ? QString("None") : hotkeyStringDecr) +
+		")";
+
+	QMenu menu;
+	QAction* actIncr = menu.addAction(hotkeyTextIncr);
+	QAction* actDecr = menu.addAction(hotkeyTextDecr);
+	QAction* action = menu.exec(ui->sl_volumeLocal->mapToGlobal(point));
+	if (action == actIncr)
+		ts3Functions.requestHotkeyInputDialog(getPluginID(), HOTKEY_VOLUME_INCREASE, 0, this);
+	else if (action == actDecr)
+		ts3Functions.requestHotkeyInputDialog(getPluginID(), HOTKEY_VOLUME_DECREASE, 0, this);
+}
+
+
+void MainWindow::onVolumeSliderContextMenuRemote(const QPoint& point)
+{
+	QString hotkeyStringIncr = getShortcutString(HOTKEY_VOLUME_INCREASE);
+	QString hotkeyTextIncr =
+		"Set 'increase 20%' hotkey (Current: " + (hotkeyStringIncr.isEmpty() ? QString("None") : hotkeyStringIncr) +
+		")";
+
+	QString hotkeyStringDecr = getShortcutString(HOTKEY_VOLUME_DECREASE);
+	QString hotkeyTextDecr =
+		"Set 'decrease 20%' hotkey (Current: " + (hotkeyStringDecr.isEmpty() ? QString("None") : hotkeyStringDecr) +
+		")";
+
+	QMenu menu;
+	QAction* actIncr = menu.addAction(hotkeyTextIncr);
+	QAction* actDecr = menu.addAction(hotkeyTextDecr);
+	QAction* action = menu.exec(ui->sl_volumeRemote->mapToGlobal(point));
+	if (action == actIncr)
+		ts3Functions.requestHotkeyInputDialog(getPluginID(), HOTKEY_VOLUME_INCREASE, 0, this);
+	else if (action == actDecr)
+		ts3Functions.requestHotkeyInputDialog(getPluginID(), HOTKEY_VOLUME_DECREASE, 0, this);
+}
+
+void MainWindow::ModelObserver::notify(ConfigModel& model, ConfigModel::notifications_e what, int data)
+{
+	switch (what)
+	{
+	case ConfigModel::NOTIFY_SET_ROWS:
+		p.ui->sb_rows->setValue(model.getRows());
+		p.createButtons();
+		p.rebuildPlaylist();
+		break;
+	case ConfigModel::NOTIFY_SET_COLS:
+		p.ui->sb_cols->setValue(model.getCols());
+		p.createButtons();
+		p.rebuildPlaylist();
+		break;
+	case ConfigModel::NOTIFY_SET_VOLUME_LOCAL:
+		if (p.ui->sl_volumeLocal->value() != model.getVolumeLocal())
+			p.ui->sl_volumeLocal->setValue(model.getVolumeLocal());
+		break;
+	case ConfigModel::NOTIFY_SET_VOLUME_REMOTE:
+		if (p.ui->sl_volumeRemote->value() != model.getVolumeRemote())
+			p.ui->sl_volumeRemote->setValue(model.getVolumeRemote());
+		break;
+	case ConfigModel::NOTIFY_SET_PLAYBACK_LOCAL:
+		if (p.ui->cb_mute_locally->isChecked() != !model.getPlaybackLocal())
+			p.ui->cb_mute_locally->setChecked(!model.getPlaybackLocal());
+		break;
+	case ConfigModel::NOTIFY_SET_SOUND:
+		p.updateButtonText(data);
+		p.rebuildPlaylist();
+		break;
+	case ConfigModel::NOTIFY_SET_MUTE_MYSELF_DURING_PB:
+		if (p.ui->cb_mute_myself->isChecked() != model.getMuteMyselfDuringPb())
+			p.ui->cb_mute_myself->setChecked(model.getMuteMyselfDuringPb());
+		break;
+	case ConfigModel::NOTIFY_SET_WINDOW_SIZE:
+	{
+		QSize s = p.size();
+		int w = 0, h = 0;
+		model.getWindowSize(&w, &h);
+		if (s.width() != w || s.height() != h)
+			p.resize(w, h);
+	}
+	break;
+	case ConfigModel::NOTIFY_SET_SHOW_HOTKEYS_ON_BUTTONS:
+		if (p.ui->cb_show_hotkeys_on_buttons->isChecked() != model.getShowHotkeysOnButtons())
+			p.ui->cb_show_hotkeys_on_buttons->setChecked(model.getShowHotkeysOnButtons());
+		for (size_t i = 0; i < p.m_buttons.size(); i++)
+			p.updateButtonText(i);
+		break;
+	case ConfigModel::NOTIFY_SET_HOTKEYS_ENABLED:
+		if (p.ui->cb_disable_hotkeys->isChecked() == model.getHotkeysEnabled())
+			p.ui->cb_disable_hotkeys->setChecked(!model.getHotkeysEnabled());
+		break;
+	default:
+		break;
+	}
+}
