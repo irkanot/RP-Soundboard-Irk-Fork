@@ -28,6 +28,9 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #include "buildinfo.h"
 
@@ -36,7 +39,7 @@
 #include "UpdaterWindow.h"
 #include "ConfigModel.h"
 
-#define CHECK_URL "https://mgraefe.de/rpsb/version/version.xml"
+#define CHECK_URL "https://api.github.com/repos/irkanot/RP-Soundboard-Irk-Fork/releases/latest"
 
 
 std::string toStdStringUtf8(const QString& str)
@@ -56,7 +59,8 @@ UpdateChecker::UpdateChecker(QObject* parent /*= nullptr*/) :
 	QObject(parent),
 	m_updater(nullptr),
 	m_config(nullptr),
-	m_explicitCheck(false)
+	m_explicitCheck(false),
+	m_useGithubApi(true)
 {
 }
 
@@ -77,6 +81,7 @@ void UpdateChecker::startCheck(bool explicitCheck, ConfigModel* config)
 	QNetworkRequest request;
 	request.setUrl(url);
 	setUserAgent(request);
+	request.setRawHeader("Accept", "application/vnd.github+json");
 	loading = Loading::mainXml;
 	m_mgr->get(request);
 }
@@ -105,8 +110,19 @@ void UpdateChecker::onFinishDownloadXml(QNetworkReply* reply)
 	}
 	else
 	{
-		parseXml(reply);
-		if (m_verInfo.valid() && m_verInfo.build > buildinfo_getVersionNumber(3))
+		if (m_useGithubApi)
+			parseJson(reply);
+		else
+			parseXml(reply);
+
+		bool hasNewVersion = false;
+		if (m_verInfo.valid())
+		{
+			QString currentVersion = buildinfo_getPluginVersionShort();
+			hasNewVersion = !m_verInfo.version.isEmpty() && (m_verInfo.version != currentVersion);
+		}
+
+		if (hasNewVersion)
 		{
 			if (!m_verInfo.featuresUrl.isEmpty())
 			{
@@ -130,7 +146,7 @@ void UpdateChecker::onFinishDownloadXml(QNetworkReply* reply)
 
 			if (m_explicitCheck)
 			{
-				QMessageBox::information(nullptr, "Update Check", "Your version of RP Soundboard is up to date.");
+				QMessageBox::information(nullptr, "Update Check", "Your version of RP Soundboard Playlist is up to date.");
 			}
 		}
 	}
@@ -151,6 +167,48 @@ void UpdateChecker::onFinishDownloadFeatures(QNetworkReply* reply)
 	}
 
 	askUserForUpdate();
+}
+
+
+void UpdateChecker::parseJson(QIODevice* device)
+{
+	m_verInfo.reset();
+
+	QByteArray payload = device->readAll();
+	QJsonParseError err;
+	QJsonDocument doc = QJsonDocument::fromJson(payload, &err);
+	if (err.error != QJsonParseError::NoError || !doc.isObject())
+	{
+		logError("UpdateChecker: invalid GitHub release JSON: %s", err.errorString().toUtf8().constData());
+		return;
+	}
+
+	QJsonObject root = doc.object();
+	m_verInfo.productName = "rp_soundboard_playlist";
+	m_verInfo.version = root.value("tag_name").toString();
+	m_verInfo.features = root.value("body").toString();
+
+	QJsonArray assets = root.value("assets").toArray();
+	for (const auto& v : assets)
+	{
+		QJsonObject a = v.toObject();
+		QString name = a.value("name").toString();
+		QString url = a.value("browser_download_url").toString();
+		if (name.endsWith(".ts3_plugin", Qt::CaseInsensitive) && !url.isEmpty())
+		{
+			m_verInfo.latestDownload = url;
+			break;
+		}
+	}
+
+	if (m_verInfo.latestDownload.isEmpty())
+	{
+		QString fallback = root.value("html_url").toString();
+		if (!fallback.isEmpty())
+			m_verInfo.latestDownload = fallback;
+	}
+
+	m_verInfo.build = buildinfo_getVersionNumber(3) + 1;
 }
 
 
@@ -226,12 +284,12 @@ void UpdateChecker::askUserForUpdate()
 	QMessageBox msgBox0;
 	msgBox0.setTextFormat(Qt::RichText);
 	msgBox0.setText(QString(
-						"A new version of RP Soundboard is available (%1).<br /><br />"
+						"A new version of RP Soundboard Playlist is available (%1).<br /><br />"
 						"Would you like to download and install it?"
 	)
 						.arg(m_verInfo.version));
 	msgBox0.setIcon(QMessageBox::Information);
-	msgBox0.setWindowTitle("New version of RP Soundboard!");
+	msgBox0.setWindowTitle("New version of RP Soundboard Playlist!");
 	msgBox0.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
 	msgBox0.setDefaultButton(QMessageBox::Yes);
 	if (m_verInfo.features.length() > 0)

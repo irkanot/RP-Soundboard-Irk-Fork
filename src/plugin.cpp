@@ -315,7 +315,7 @@ extern "C"
 		 * The description is shown in the clients hotkey dialog. */
 		int i;
 		int numKeys = 200;
-		int numExtra = NUM_CONFIGS + 9;
+		int numExtra = NUM_CONFIGS + 10;
 		char kw[PLUGIN_HOTKEY_BUFSZ];
 		char desc[PLUGIN_HOTKEY_BUFSZ];
 
@@ -343,6 +343,7 @@ extern "C"
 		CREATE_HOTKEY(HOTKEY_PLAYLIST_START, "Start/stop playlist");
 		CREATE_HOTKEY(HOTKEY_PLAYLIST_NEXT, "Next playlist track");
 		CREATE_HOTKEY(HOTKEY_PLAYLIST_PREV, "Previous playlist track");
+		CREATE_HOTKEY(HOTKEY_PLAYLIST_RANDOM, "Random playlist track (no repeat)");
 		END_CREATE_HOTKEYS;
 
 		/* The client will call ts3plugin_freeMemory to release all allocated memory */

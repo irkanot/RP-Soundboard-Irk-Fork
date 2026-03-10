@@ -21,6 +21,7 @@
 #include <QRadioButton>
 #include <QListWidget>
 #include <vector>
+#include <random>
 
 #include "ui_MainWindow.h"
 #include "ConfigModel.h"
@@ -56,6 +57,7 @@ class MainWindow : public QWidget
 	void playlistStart();
 	void playlistNext();
 	void playlistPrev();
+	void playlistRandom();
 
   protected:
 	virtual void closeEvent(QCloseEvent* evt) override;
@@ -99,6 +101,7 @@ class MainWindow : public QWidget
 	void onPlaylistStartPressed();
 	void onPlaylistNextPressed();
 	void onPlaylistPrevPressed();
+	void onPlaylistRandomPressed();
 	void onPlaylistItemDoubleClicked(QListWidgetItem* item);
 
   signals:
@@ -154,13 +157,16 @@ class MainWindow : public QWidget
 	QPushButton* m_playlistStartButton;
 	QPushButton* m_playlistPrevButton;
 	QPushButton* m_playlistNextButton;
+	QPushButton* m_playlistRandomButton;
 	QListWidget* m_playlistView;
 	QLabel* m_playlistNowLabel;
 	QLabel* m_playlistNextLabel;
 	std::vector<int> m_playlistIndices;
+	std::vector<int> m_randomRemaining;
 	int m_playlistCurrentPos;
 	bool m_playlistRunning;
 	bool m_ignoreNextStopEvent;
+	std::mt19937 m_rng;
 	std::array<QRadioButton*, NUM_CONFIGS> m_configRadioButtons;
 	std::array<QPushButton*, NUM_CONFIGS> m_configHotkeyButtons;
 };

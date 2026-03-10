@@ -405,6 +405,11 @@ void sb_onHotkeyPressed(const char* keyword)
 		if (configDialog)
 			configDialog->playlistPrev();
 	}
+	else if (strcmp(keyword, HOTKEY_PLAYLIST_RANDOM) == 0)
+	{
+		if (configDialog)
+			configDialog->playlistRandom();
+	}
 }
 
 

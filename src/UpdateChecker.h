@@ -11,6 +11,7 @@
 #include <QObject>
 #include <QXmlStreamReader>
 #include <QNetworkRequest>
+#include <QJsonObject>
 
 class QNetworkReply;
 class QNetworkAccessManager;
@@ -47,6 +48,7 @@ class UpdateChecker : public QObject
 
   private:
 	void parseXml(QIODevice* device);
+	void parseJson(QIODevice* device);
 	void parseProduct(QXmlStreamReader& xml);
 	void parseProductInner(QXmlStreamReader& xml);
 	void onFinishDownloadXml(QNetworkReply* reply);
@@ -59,6 +61,7 @@ class UpdateChecker : public QObject
 		mainXml,
 		features,
 	} loading;
+	bool m_useGithubApi;
 
 	QNetworkAccessManager* m_mgr;
 	version_info_t m_verInfo;

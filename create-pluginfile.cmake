@@ -6,7 +6,7 @@ execute_process(
 )
 string(STRIP "${gitVersionRaw}" gitVersion)
 
-set(outputFile "${RPSB_PLUGINFILE_OUTPUT_DIR}/rp_soundboard_${gitVersion}.ts3_plugin")
+set(outputFile "${RPSB_PLUGINFILE_OUTPUT_DIR}/rp_soundboard_playlist_${gitVersion}.ts3_plugin")
 
 message("Creating final plugin package in ${RPSB_PLUGINFILE_OUTPUT_DIR}")
 

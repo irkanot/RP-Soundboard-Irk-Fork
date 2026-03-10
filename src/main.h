@@ -54,3 +54,4 @@ void sb_disableHotkeysTemporarily(bool disable);
 #define HOTKEY_PLAYLIST_START "playlist_start"
 #define HOTKEY_PLAYLIST_NEXT "playlist_next"
 #define HOTKEY_PLAYLIST_PREV "playlist_prev"
+#define HOTKEY_PLAYLIST_RANDOM "playlist_random"

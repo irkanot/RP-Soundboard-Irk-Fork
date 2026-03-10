@@ -82,6 +82,7 @@ target_link_libraries(rp_soundboard Qt5::Core Qt5::Widgets Qt5::Gui Qt5::Network
 
 target_include_directories(rp_soundboard PUBLIC "pluginsdk/include" ${ffmpegIncludeDir})
 set_target_properties(rp_soundboard PROPERTIES
+	OUTPUT_NAME "rp_soundboard_playlist"
 	SUFFIX ${libSuffix}
 	RUNTIME_OUTPUT_DIRECTORY_DEBUG debug
 	RUNTIME_OUTPUT_DIRECTORY_RELEASE release
@@ -91,7 +92,7 @@ set_target_properties(rp_soundboard PROPERTIES
 if (MSVC)
 	target_sources(rp_soundboard PRIVATE "src/windows/resource.h" "src/windows/Resource.rc")
 	target_link_libraries(rp_soundboard ${avcodec} ${avformat} ${avutil} ${swresample})
-	target_link_libraries(rp_soundboard wsock32 ws2_32 secur32 Crypt32 Ncrypt Bcrypt) # some windows stuff
+	target_link_libraries(rp_soundboard wsock32 ws2_32 secur32 Crypt32 Ncrypt Bcrypt psapi uuid oleaut32 shlwapi gdi32 vfw32 mfuuid strmiids ole32 user32) # windows/ffmpeg static deps
 	target_compile_options(rp_soundboard PRIVATE /MP) # multiprocessor compiling
 else()
 	if(APPLE)

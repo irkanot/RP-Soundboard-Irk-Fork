@@ -14,6 +14,8 @@
 #include <QMessageBox>
 #include <QPropertyAnimation>
 #include <QColorDialog>
+#include <algorithm>
+#include <random>
 
 #include "MainWindow.h"
 #include "ConfigModel.h"
@@ -50,6 +52,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistStartButton(nullptr),
 	m_playlistPrevButton(nullptr),
 	m_playlistNextButton(nullptr),
+	m_playlistRandomButton(nullptr),
 	m_playlistView(nullptr),
 	m_playlistNowLabel(nullptr),
 	m_playlistNextLabel(nullptr),
@@ -62,6 +65,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 
 	m_pauseIcon = QIcon(":/icon/img/pausebutton_32.png");
 	m_playIcon = QIcon(":/icon/img/playarrow_32.png");
+	m_rng.seed(std::random_device{}());
 
 	ui->setupUi(this);
 	// setAttribute(Qt::WA_DeleteOnClose);
@@ -104,9 +108,12 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextButton->setToolTip("Next track");
 	m_playlistStartButton = new QPushButton("▶ Playlist", this);
 	m_playlistStartButton->setToolTip("Start playlist");
+	m_playlistRandomButton = new QPushButton("🔀", this);
+	m_playlistRandomButton->setToolTip("Random track (no repeat in current round)");
 	ui->horizontalLayout_4->insertWidget(0, m_playlistPrevButton);
 	ui->horizontalLayout_4->insertWidget(1, m_playlistStartButton);
 	ui->horizontalLayout_4->insertWidget(2, m_playlistNextButton);
+	ui->horizontalLayout_4->insertWidget(3, m_playlistRandomButton);
 
 	QWidget* playlistWidget = new QWidget(this);
 	QVBoxLayout* playlistLayout = new QVBoxLayout(playlistWidget);
@@ -130,6 +137,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistStartButton->setContextMenuPolicy(Qt::CustomContextMenu);
 	m_playlistPrevButton->setContextMenuPolicy(Qt::CustomContextMenu);
 	m_playlistNextButton->setContextMenuPolicy(Qt::CustomContextMenu);
+	m_playlistRandomButton->setContextMenuPolicy(Qt::CustomContextMenu);
 
 	connect(ui->b_stop, SIGNAL(clicked()), this, SLOT(onClickedStop()));
 	connect(
@@ -140,6 +148,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	connect(m_playlistStartButton, SIGNAL(clicked()), this, SLOT(onPlaylistStartPressed()));
 	connect(m_playlistPrevButton, SIGNAL(clicked()), this, SLOT(onPlaylistPrevPressed()));
 	connect(m_playlistNextButton, SIGNAL(clicked()), this, SLOT(onPlaylistNextPressed()));
+	connect(m_playlistRandomButton, SIGNAL(clicked()), this, SLOT(onPlaylistRandomPressed()));
 	connect(m_playlistView, SIGNAL(itemDoubleClicked(QListWidgetItem*)), this, SLOT(onPlaylistItemDoubleClicked(QListWidgetItem*)));
 	connect(
 		ui->b_pause, SIGNAL(customContextMenuRequested(const QPoint&)), this,
@@ -179,6 +188,10 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	connect(
 		m_playlistPrevButton, &QPushButton::customContextMenuRequested, [this](const QPoint& point)
 		{ this->showSetHotkeyMenu(HOTKEY_PLAYLIST_PREV, m_playlistPrevButton->mapToGlobal(point)); }
+	);
+	connect(
+		m_playlistRandomButton, &QPushButton::customContextMenuRequested, [this](const QPoint& point)
+		{ this->showSetHotkeyMenu(HOTKEY_PLAYLIST_RANDOM, m_playlistRandomButton->mapToGlobal(point)); }
 	);
 
 	/* Load/Save Model */
@@ -518,18 +531,28 @@ void MainWindow::playSound(size_t buttonId)
 void MainWindow::rebuildPlaylist()
 {
 	m_playlistIndices.clear();
+	m_randomRemaining.clear();
 	if (m_playlistView)
 		m_playlistView->clear();
 
+	std::vector<std::pair<QString, int>> entries;
 	for (size_t i = 0; i < m_buttons.size(); ++i)
 	{
 		const SoundInfo* info = m_model->getSoundInfo((int)i);
 		if (!info || info->filename.isEmpty())
 			continue;
-		m_playlistIndices.push_back((int)i);
 		QString title = !info->customText.isEmpty() ? unescapeCustomText(info->customText) : QFileInfo(info->filename).baseName();
+		entries.push_back({title, (int)i});
+	}
+
+	std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b)
+		{ return QString::compare(a.first, b.first, Qt::CaseInsensitive) < 0; });
+
+	for (size_t i = 0; i < entries.size(); ++i)
+	{
+		m_playlistIndices.push_back(entries[i].second);
 		if (m_playlistView)
-			m_playlistView->addItem(QString("%1. %2").arg(m_playlistIndices.size()).arg(title));
+			m_playlistView->addItem(QString("%1. %2").arg((int)i + 1).arg(entries[i].first));
 	}
 
 	if (m_playlistIndices.empty())
@@ -629,6 +652,34 @@ void MainWindow::playlistPrev()
 		return;
 	int prevPos = (m_playlistCurrentPos <= 0) ? (int)m_playlistIndices.size() - 1 : (m_playlistCurrentPos - 1);
 	playPlaylistPosition(prevPos);
+}
+
+void MainWindow::playlistRandom()
+{
+	if (m_playlistIndices.empty())
+		return;
+
+	if (m_randomRemaining.empty())
+	{
+		m_randomRemaining.resize((int)m_playlistIndices.size());
+		for (int i = 0; i < (int)m_playlistIndices.size(); ++i)
+			m_randomRemaining[i] = i;
+		if (m_randomRemaining.size() > 1 && m_playlistCurrentPos >= 0)
+		{
+			auto it = std::find(m_randomRemaining.begin(), m_randomRemaining.end(), m_playlistCurrentPos);
+			if (it != m_randomRemaining.end())
+				m_randomRemaining.erase(it);
+		}
+	}
+
+	if (m_randomRemaining.empty())
+		return;
+
+	std::uniform_int_distribution<int> dist(0, (int)m_randomRemaining.size() - 1);
+	int pick = dist(m_rng);
+	int nextPos = m_randomRemaining[pick];
+	m_randomRemaining.erase(m_randomRemaining.begin() + pick);
+	playPlaylistPosition(nextPos);
 }
 
 
@@ -993,6 +1044,11 @@ void MainWindow::onPlaylistNextPressed()
 void MainWindow::onPlaylistPrevPressed()
 {
 	playlistPrev();
+}
+
+void MainWindow::onPlaylistRandomPressed()
+{
+	playlistRandom();
 }
 
 void MainWindow::onPlaylistItemDoubleClicked(QListWidgetItem* item)
