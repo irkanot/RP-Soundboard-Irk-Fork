@@ -22,6 +22,8 @@
 #include <QListWidget>
 #include <vector>
 #include <random>
+#include <QEvent>
+#include <QStringList>
 
 #include "ui_MainWindow.h"
 #include "ConfigModel.h"
@@ -62,6 +64,7 @@ class MainWindow : public QWidget
   protected:
 	virtual void closeEvent(QCloseEvent* evt) override;
 	virtual void showEvent(QShowEvent* evt) override;
+	virtual bool eventFilter(QObject* watched, QEvent* event) override;
 
   private slots:
 	void onClickedPlay();
@@ -102,6 +105,7 @@ class MainWindow : public QWidget
 	void onPlaylistNextPressed();
 	void onPlaylistPrevPressed();
 	void onPlaylistRandomPressed();
+	void onPlaylistAddFilesPressed();
 	void onPlaylistItemDoubleClicked(QListWidgetItem* item);
 
   signals:
@@ -126,6 +130,10 @@ class MainWindow : public QWidget
 	void rebuildPlaylist();
 	void refreshPlaylistUi();
 	void playPlaylistPosition(int pos);
+	void addFilesToPlaylist(const QStringList& files);
+	void loadPersistentPlaylist();
+	void savePersistentPlaylist();
+	QString playlistStorePath() const;
 
 	class ModelObserver : public ConfigModel::Observer
 	{
@@ -158,10 +166,11 @@ class MainWindow : public QWidget
 	QPushButton* m_playlistPrevButton;
 	QPushButton* m_playlistNextButton;
 	QPushButton* m_playlistRandomButton;
+	QPushButton* m_playlistAddButton;
 	QListWidget* m_playlistView;
 	QLabel* m_playlistNowLabel;
 	QLabel* m_playlistNextLabel;
-	std::vector<int> m_playlistIndices;
+	QStringList m_playlistFiles;
 	std::vector<int> m_randomRemaining;
 	int m_playlistCurrentPos;
 	bool m_playlistRunning;

@@ -14,6 +14,14 @@
 #include <QMessageBox>
 #include <QPropertyAnimation>
 #include <QColorDialog>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QFile>
+#include <QDir>
+#include <QStandardPaths>
 #include <algorithm>
 #include <random>
 
@@ -53,6 +61,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistPrevButton(nullptr),
 	m_playlistNextButton(nullptr),
 	m_playlistRandomButton(nullptr),
+	m_playlistAddButton(nullptr),
 	m_playlistView(nullptr),
 	m_playlistNowLabel(nullptr),
 	m_playlistNextLabel(nullptr),
@@ -110,10 +119,13 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistStartButton->setToolTip("Start playlist");
 	m_playlistRandomButton = new QPushButton("🔀", this);
 	m_playlistRandomButton->setToolTip("Random track (no repeat in current round)");
+	m_playlistAddButton = new QPushButton("＋ Files", this);
+	m_playlistAddButton->setToolTip("Add one or more songs to playlist");
 	ui->horizontalLayout_4->insertWidget(0, m_playlistPrevButton);
 	ui->horizontalLayout_4->insertWidget(1, m_playlistStartButton);
 	ui->horizontalLayout_4->insertWidget(2, m_playlistNextButton);
 	ui->horizontalLayout_4->insertWidget(3, m_playlistRandomButton);
+	ui->horizontalLayout_4->insertWidget(4, m_playlistAddButton);
 
 	QWidget* playlistWidget = new QWidget(this);
 	QVBoxLayout* playlistLayout = new QVBoxLayout(playlistWidget);
@@ -123,6 +135,10 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextLabel = new QLabel("Next: -", playlistWidget);
 	m_playlistView = new QListWidget(playlistWidget);
 	m_playlistView->setMinimumHeight(110);
+	m_playlistView->setAcceptDrops(true);
+	m_playlistView->viewport()->setAcceptDrops(true);
+	m_playlistView->setDragDropMode(QAbstractItemView::DropOnly);
+	m_playlistView->viewport()->installEventFilter(this);
 	playlistLayout->addWidget(m_playlistNowLabel);
 	playlistLayout->addWidget(m_playlistNextLabel);
 	playlistLayout->addWidget(m_playlistView);
@@ -149,6 +165,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	connect(m_playlistPrevButton, SIGNAL(clicked()), this, SLOT(onPlaylistPrevPressed()));
 	connect(m_playlistNextButton, SIGNAL(clicked()), this, SLOT(onPlaylistNextPressed()));
 	connect(m_playlistRandomButton, SIGNAL(clicked()), this, SLOT(onPlaylistRandomPressed()));
+	connect(m_playlistAddButton, SIGNAL(clicked()), this, SLOT(onPlaylistAddFilesPressed()));
 	connect(m_playlistView, SIGNAL(itemDoubleClicked(QListWidgetItem*)), this, SLOT(onPlaylistItemDoubleClicked(QListWidgetItem*)));
 	connect(
 		ui->b_pause, SIGNAL(customContextMenuRequested(const QPoint&)), this,
@@ -223,6 +240,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 
 	/* Force configuration 0 */
 	setConfiguration(0);
+	loadPersistentPlaylist();
 	rebuildPlaylist();
 
 	ui->gridWidget->setStyleSheet(
@@ -519,48 +537,31 @@ void MainWindow::playSound(size_t buttonId)
 {
 	const SoundInfo* info = m_model->getSoundInfo(buttonId);
 	if (info)
-	{
-		auto it = std::find(m_playlistIndices.begin(), m_playlistIndices.end(), (int)buttonId);
-		if (it != m_playlistIndices.end())
-			m_playlistCurrentPos = (int)std::distance(m_playlistIndices.begin(), it);
 		sb_playFile(*info);
-		refreshPlaylistUi();
-	}
 }
 
 void MainWindow::rebuildPlaylist()
 {
-	m_playlistIndices.clear();
 	m_randomRemaining.clear();
 	if (m_playlistView)
 		m_playlistView->clear();
 
-	std::vector<std::pair<QString, int>> entries;
-	for (size_t i = 0; i < m_buttons.size(); ++i)
-	{
-		const SoundInfo* info = m_model->getSoundInfo((int)i);
-		if (!info || info->filename.isEmpty())
-			continue;
-		QString title = !info->customText.isEmpty() ? unescapeCustomText(info->customText) : QFileInfo(info->filename).baseName();
-		entries.push_back({title, (int)i});
-	}
+	QStringList sorted = m_playlistFiles;
+	sorted.sort(Qt::CaseInsensitive);
+	m_playlistFiles = sorted;
 
-	std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b)
-		{ return QString::compare(a.first, b.first, Qt::CaseInsensitive) < 0; });
-
-	for (size_t i = 0; i < entries.size(); ++i)
+	for (int i = 0; i < m_playlistFiles.size(); ++i)
 	{
-		m_playlistIndices.push_back(entries[i].second);
 		if (m_playlistView)
-			m_playlistView->addItem(QString("%1. %2").arg((int)i + 1).arg(entries[i].first));
+			m_playlistView->addItem(QString("%1. %2").arg(i + 1).arg(QFileInfo(m_playlistFiles[i]).baseName()));
 	}
 
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 	{
 		m_playlistCurrentPos = -1;
 		m_playlistRunning = false;
 	}
-	else if (m_playlistCurrentPos < 0 || m_playlistCurrentPos >= (int)m_playlistIndices.size())
+	else if (m_playlistCurrentPos < 0 || m_playlistCurrentPos >= m_playlistFiles.size())
 	{
 		m_playlistCurrentPos = 0;
 	}
@@ -573,7 +574,7 @@ void MainWindow::refreshPlaylistUi()
 	if (!m_playlistNowLabel || !m_playlistNextLabel)
 		return;
 
-	if (m_playlistIndices.empty() || m_playlistCurrentPos < 0)
+	if (m_playlistFiles.isEmpty() || m_playlistCurrentPos < 0)
 	{
 		m_playlistNowLabel->setText("Now: -");
 		m_playlistNextLabel->setText("Next: -");
@@ -582,47 +583,39 @@ void MainWindow::refreshPlaylistUi()
 		return;
 	}
 
-	int nowButtonId = m_playlistIndices[m_playlistCurrentPos];
-	const SoundInfo* nowInfo = m_model->getSoundInfo(nowButtonId);
-	QString nowTitle = nowInfo ? (!nowInfo->customText.isEmpty() ? unescapeCustomText(nowInfo->customText)
-																 : QFileInfo(nowInfo->filename).baseName())
-						  : QString("-");
+	QString nowTitle = QFileInfo(m_playlistFiles[m_playlistCurrentPos]).baseName();
 	m_playlistNowLabel->setText(QString("Now: %1").arg(nowTitle));
 
-	int nextPos = (m_playlistCurrentPos + 1) % m_playlistIndices.size();
-	int nextButtonId = m_playlistIndices[nextPos];
-	const SoundInfo* nextInfo = m_model->getSoundInfo(nextButtonId);
-	QString nextTitle = nextInfo ? (!nextInfo->customText.isEmpty() ? unescapeCustomText(nextInfo->customText)
-																  : QFileInfo(nextInfo->filename).baseName())
-						   : QString("-");
+	int nextPos = (m_playlistCurrentPos + 1) % m_playlistFiles.size();
+	QString nextTitle = QFileInfo(m_playlistFiles[nextPos]).baseName();
 	m_playlistNextLabel->setText(QString("Next: %1").arg(nextTitle));
 
 	if (m_playlistView)
-	{
 		m_playlistView->setCurrentRow(m_playlistCurrentPos);
-	}
 	if (m_playlistStartButton)
 		m_playlistStartButton->setText(m_playlistRunning ? "■ Playlist" : "▶ Playlist");
 }
 
 void MainWindow::playPlaylistPosition(int pos)
 {
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		return;
-	if (pos < 0 || pos >= (int)m_playlistIndices.size())
+	if (pos < 0 || pos >= m_playlistFiles.size())
 		return;
 	m_playlistCurrentPos = pos;
+	SoundInfo info;
+	info.filename = m_playlistFiles[m_playlistCurrentPos];
 	m_ignoreNextStopEvent = true;
-	playSound(m_playlistIndices[m_playlistCurrentPos]);
+	sb_playFile(info);
 	m_playlistRunning = true;
 	refreshPlaylistUi();
 }
 
 void MainWindow::playlistStart()
 {
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		rebuildPlaylist();
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		return;
 
 	if (m_playlistRunning)
@@ -640,29 +633,29 @@ void MainWindow::playlistStart()
 
 void MainWindow::playlistNext()
 {
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		return;
-	int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistIndices.size();
+	int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistFiles.size();
 	playPlaylistPosition(nextPos);
 }
 
 void MainWindow::playlistPrev()
 {
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		return;
-	int prevPos = (m_playlistCurrentPos <= 0) ? (int)m_playlistIndices.size() - 1 : (m_playlistCurrentPos - 1);
+	int prevPos = (m_playlistCurrentPos <= 0) ? (int)m_playlistFiles.size() - 1 : (m_playlistCurrentPos - 1);
 	playPlaylistPosition(prevPos);
 }
 
 void MainWindow::playlistRandom()
 {
-	if (m_playlistIndices.empty())
+	if (m_playlistFiles.isEmpty())
 		return;
 
 	if (m_randomRemaining.empty())
 	{
-		m_randomRemaining.resize((int)m_playlistIndices.size());
-		for (int i = 0; i < (int)m_playlistIndices.size(); ++i)
+		m_randomRemaining.resize((int)m_playlistFiles.size());
+		for (int i = 0; i < (int)m_playlistFiles.size(); ++i)
 			m_randomRemaining[i] = i;
 		if (m_randomRemaining.size() > 1 && m_playlistCurrentPos >= 0)
 		{
@@ -682,6 +675,106 @@ void MainWindow::playlistRandom()
 	playPlaylistPosition(nextPos);
 }
 
+void MainWindow::addFilesToPlaylist(const QStringList& files)
+{
+	if (files.isEmpty())
+		return;
+
+	int added = 0;
+	for (const QString& f : files)
+	{
+		QFileInfo fi(f);
+		if (!fi.exists() || !fi.isFile())
+			continue;
+		QString abs = fi.absoluteFilePath();
+		if (!m_playlistFiles.contains(abs, Qt::CaseInsensitive))
+		{
+			m_playlistFiles << abs;
+			added++;
+		}
+	}
+
+	if (added > 0)
+	{
+		savePersistentPlaylist();
+		rebuildPlaylist();
+	}
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+	if (m_playlistView && watched == m_playlistView->viewport())
+	{
+		if (event->type() == QEvent::DragEnter)
+		{
+			auto* ev = static_cast<QDragEnterEvent*>(event);
+			if (ev->mimeData()->hasUrls())
+				ev->acceptProposedAction();
+			return true;
+		}
+		if (event->type() == QEvent::Drop)
+		{
+			auto* ev = static_cast<QDropEvent*>(event);
+			QStringList files;
+			for (const QUrl& url : ev->mimeData()->urls())
+			{
+				if (url.isLocalFile())
+				{
+					QFileInfo fi(url.toLocalFile());
+					if (fi.isFile())
+						files << fi.absoluteFilePath();
+				}
+			}
+			if (!files.isEmpty())
+			{
+				addFilesToPlaylist(files);
+				ev->acceptProposedAction();
+			}
+			return true;
+		}
+	}
+	return QWidget::eventFilter(watched, event);
+}
+
+QString MainWindow::playlistStorePath() const
+{
+	QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+	if (base.isEmpty())
+		base = QDir::tempPath();
+	QDir dir(base);
+	dir.mkpath(".");
+	return dir.filePath("playlist.json");
+}
+
+void MainWindow::loadPersistentPlaylist()
+{
+	m_playlistFiles.clear();
+	QFile f(playlistStorePath());
+	if (!f.exists())
+		return;
+	if (!f.open(QIODevice::ReadOnly))
+		return;
+	QJsonParseError e;
+	QJsonDocument d = QJsonDocument::fromJson(f.readAll(), &e);
+	if (e.error != QJsonParseError::NoError || !d.isArray())
+		return;
+	for (const auto& v : d.array())
+	{
+		QString p = v.toString();
+		if (!p.isEmpty())
+			m_playlistFiles << p;
+	}
+}
+
+void MainWindow::savePersistentPlaylist()
+{
+	QJsonArray arr;
+	for (const QString& p : m_playlistFiles)
+		arr.append(p);
+	QFile f(playlistStorePath());
+	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
 
 void MainWindow::chooseFile(size_t buttonId)
 {
@@ -818,9 +911,9 @@ void MainWindow::onStopPlayingSound()
 		return;
 	}
 
-	if (m_playlistRunning && !m_playlistIndices.empty())
+	if (m_playlistRunning && !m_playlistFiles.isEmpty())
 	{
-		int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistIndices.size();
+		int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistFiles.size();
 		playPlaylistPosition(nextPos);
 	}
 	else
@@ -1049,6 +1142,19 @@ void MainWindow::onPlaylistPrevPressed()
 void MainWindow::onPlaylistRandomPressed()
 {
 	playlistRandom();
+}
+
+void MainWindow::onPlaylistAddFilesPressed()
+{
+	QStringList files = QFileDialog::getOpenFileNames(
+		this,
+		tr("Add songs to playlist"),
+		QString(),
+		tr("Audio files (*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma *.opus *.mp4);;All files (*.*)")
+	);
+	if (files.isEmpty())
+		return;
+	addFilesToPlaylist(files);
 }
 
 void MainWindow::onPlaylistItemDoubleClicked(QListWidgetItem* item)
