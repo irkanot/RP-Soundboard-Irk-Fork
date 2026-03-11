@@ -537,8 +537,14 @@ void MainWindow::setPlayingLabelIcon(int index)
 void MainWindow::playSound(size_t buttonId)
 {
 	const SoundInfo* info = m_model->getSoundInfo(buttonId);
-	if (info)
-		sb_playFile(*info);
+	if (!info)
+		return;
+
+	// Manual button playback must not drive playlist progression.
+	m_playlistRunning = false;
+	m_ignoreNextStopEvent = true;
+	sb_playFile(*info);
+	refreshPlaylistUi();
 }
 
 void MainWindow::rebuildPlaylist()
