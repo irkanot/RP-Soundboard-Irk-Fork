@@ -67,7 +67,8 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextLabel(nullptr),
 	m_playlistCurrentPos(-1),
 	m_playlistRunning(false),
-	m_ignoreNextStopEvent(false)
+	m_ignoreNextStopEvent(false),
+	m_playlistRandomMode(false)
 {
 	/* Ensure resources are loaded */
 	Q_INIT_RESOURCE(qtres);
@@ -117,8 +118,8 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextButton->setToolTip("Next track");
 	m_playlistStartButton = new QPushButton("▶ Playlist", this);
 	m_playlistStartButton->setToolTip("Start playlist");
-	m_playlistRandomButton = new QPushButton("🔀", this);
-	m_playlistRandomButton->setToolTip("Random track (no repeat in current round)");
+	m_playlistRandomButton = new QPushButton("Random OFF", this);
+	m_playlistRandomButton->setToolTip("Toggle random mode (no repeat until all tracks played)");
 	m_playlistAddButton = new QPushButton("＋ Files", this);
 	m_playlistAddButton->setToolTip("Add one or more songs to playlist");
 	ui->horizontalLayout_4->insertWidget(0, m_playlistPrevButton);
@@ -594,6 +595,8 @@ void MainWindow::refreshPlaylistUi()
 		m_playlistView->setCurrentRow(m_playlistCurrentPos);
 	if (m_playlistStartButton)
 		m_playlistStartButton->setText(m_playlistRunning ? "■ Playlist" : "▶ Playlist");
+	if (m_playlistRandomButton)
+		m_playlistRandomButton->setText(m_playlistRandomMode ? "Random ON" : "Random OFF");
 }
 
 void MainWindow::playPlaylistPosition(int pos)
@@ -626,6 +629,12 @@ void MainWindow::playlistStart()
 		return;
 	}
 
+	if (m_playlistRandomMode)
+	{
+		playlistRandom();
+		return;
+	}
+
 	if (m_playlistCurrentPos < 0)
 		m_playlistCurrentPos = 0;
 	playPlaylistPosition(m_playlistCurrentPos);
@@ -635,6 +644,11 @@ void MainWindow::playlistNext()
 {
 	if (m_playlistFiles.isEmpty())
 		return;
+	if (m_playlistRandomMode)
+	{
+		playlistRandom();
+		return;
+	}
 	int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistFiles.size();
 	playPlaylistPosition(nextPos);
 }
@@ -913,8 +927,13 @@ void MainWindow::onStopPlayingSound()
 
 	if (m_playlistRunning && !m_playlistFiles.isEmpty())
 	{
-		int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistFiles.size();
-		playPlaylistPosition(nextPos);
+		if (m_playlistRandomMode)
+			playlistRandom();
+		else
+		{
+			int nextPos = (m_playlistCurrentPos < 0) ? 0 : (m_playlistCurrentPos + 1) % m_playlistFiles.size();
+			playPlaylistPosition(nextPos);
+		}
 	}
 	else
 	{
@@ -1141,7 +1160,9 @@ void MainWindow::onPlaylistPrevPressed()
 
 void MainWindow::onPlaylistRandomPressed()
 {
-	playlistRandom();
+	m_playlistRandomMode = !m_playlistRandomMode;
+	m_randomRemaining.clear();
+	refreshPlaylistUi();
 }
 
 void MainWindow::onPlaylistAddFilesPressed()

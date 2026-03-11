@@ -175,6 +175,7 @@ class MainWindow : public QWidget
 	int m_playlistCurrentPos;
 	bool m_playlistRunning;
 	bool m_ignoreNextStopEvent;
+	bool m_playlistRandomMode;
 	std::mt19937 m_rng;
 	std::array<QRadioButton*, NUM_CONFIGS> m_configRadioButtons;
 	std::array<QPushButton*, NUM_CONFIGS> m_configHotkeyButtons;
