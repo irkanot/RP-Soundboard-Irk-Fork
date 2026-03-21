@@ -62,6 +62,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextButton(nullptr),
 	m_playlistRandomButton(nullptr),
 	m_playlistAddButton(nullptr),
+	m_playlistRemoveButton(nullptr),
 	m_playlistView(nullptr),
 	m_playlistNowLabel(nullptr),
 	m_playlistNextLabel(nullptr),
@@ -122,11 +123,14 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistRandomButton->setToolTip("Toggle random mode (no repeat until all tracks played)");
 	m_playlistAddButton = new QPushButton("＋ Files", this);
 	m_playlistAddButton->setToolTip("Add one or more songs to playlist");
+	m_playlistRemoveButton = new QPushButton("－ Remove", this);
+	m_playlistRemoveButton->setToolTip("Remove selected songs from playlist");
 	ui->horizontalLayout_4->insertWidget(0, m_playlistPrevButton);
 	ui->horizontalLayout_4->insertWidget(1, m_playlistStartButton);
 	ui->horizontalLayout_4->insertWidget(2, m_playlistNextButton);
 	ui->horizontalLayout_4->insertWidget(3, m_playlistRandomButton);
 	ui->horizontalLayout_4->insertWidget(4, m_playlistAddButton);
+	ui->horizontalLayout_4->insertWidget(5, m_playlistRemoveButton);
 
 	QWidget* playlistWidget = new QWidget(this);
 	QVBoxLayout* playlistLayout = new QVBoxLayout(playlistWidget);
@@ -136,6 +140,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	m_playlistNextLabel = new QLabel("Next: -", playlistWidget);
 	m_playlistView = new QListWidget(playlistWidget);
 	m_playlistView->setMinimumHeight(110);
+	m_playlistView->setSelectionMode(QAbstractItemView::ExtendedSelection);
 	m_playlistView->setAcceptDrops(true);
 	m_playlistView->viewport()->setAcceptDrops(true);
 	m_playlistView->setDragDropMode(QAbstractItemView::DropOnly);
@@ -167,6 +172,7 @@ MainWindow::MainWindow(ConfigModel* model, QWidget* parent /*= 0*/) :
 	connect(m_playlistNextButton, SIGNAL(clicked()), this, SLOT(onPlaylistNextPressed()));
 	connect(m_playlistRandomButton, SIGNAL(clicked()), this, SLOT(onPlaylistRandomPressed()));
 	connect(m_playlistAddButton, SIGNAL(clicked()), this, SLOT(onPlaylistAddFilesPressed()));
+	connect(m_playlistRemoveButton, SIGNAL(clicked()), this, SLOT(onPlaylistRemoveFilesPressed()));
 	connect(m_playlistView, SIGNAL(itemDoubleClicked(QListWidgetItem*)), this, SLOT(onPlaylistItemDoubleClicked(QListWidgetItem*)));
 	connect(
 		ui->b_pause, SIGNAL(customContextMenuRequested(const QPoint&)), this,
@@ -1182,6 +1188,59 @@ void MainWindow::onPlaylistAddFilesPressed()
 	if (files.isEmpty())
 		return;
 	addFilesToPlaylist(files);
+}
+
+void MainWindow::onPlaylistRemoveFilesPressed()
+{
+	if (!m_playlistView)
+		return;
+
+	QList<QListWidgetItem*> selected = m_playlistView->selectedItems();
+	if (selected.isEmpty())
+	{
+		QMessageBox::information(this, tr("Playlist"), tr("Select one or more songs to remove."));
+		return;
+	}
+
+	QList<int> rows;
+	rows.reserve(selected.size());
+	for (QListWidgetItem* it : selected)
+		rows << m_playlistView->row(it);
+
+	std::sort(rows.begin(), rows.end(), std::greater<int>());
+	rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+
+	bool removedCurrent = false;
+	for (int row : rows)
+	{
+		if (row < 0 || row >= m_playlistFiles.size())
+			continue;
+		if (row == m_playlistCurrentPos)
+			removedCurrent = true;
+		else if (row < m_playlistCurrentPos)
+			m_playlistCurrentPos--;
+		m_playlistFiles.removeAt(row);
+	}
+
+	if (m_playlistFiles.isEmpty())
+	{
+		m_playlistCurrentPos = -1;
+		m_playlistRunning = false;
+	}
+	else
+	{
+		if (m_playlistCurrentPos < 0 || m_playlistCurrentPos >= m_playlistFiles.size())
+			m_playlistCurrentPos = 0;
+		if (removedCurrent && m_playlistRunning)
+		{
+			m_playlistRunning = false;
+			sb_stopPlayback();
+		}
+	}
+
+	m_randomRemaining.clear();
+	savePersistentPlaylist();
+	rebuildPlaylist();
 }
 
 void MainWindow::onPlaylistItemDoubleClicked(QListWidgetItem* item)

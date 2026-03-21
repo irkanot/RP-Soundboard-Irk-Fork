@@ -106,6 +106,7 @@ class MainWindow : public QWidget
 	void onPlaylistPrevPressed();
 	void onPlaylistRandomPressed();
 	void onPlaylistAddFilesPressed();
+	void onPlaylistRemoveFilesPressed();
 	void onPlaylistItemDoubleClicked(QListWidgetItem* item);
 
   signals:
@@ -167,6 +168,7 @@ class MainWindow : public QWidget
 	QPushButton* m_playlistNextButton;
 	QPushButton* m_playlistRandomButton;
 	QPushButton* m_playlistAddButton;
+	QPushButton* m_playlistRemoveButton;
 	QListWidget* m_playlistView;
 	QLabel* m_playlistNowLabel;
 	QLabel* m_playlistNextLabel;
